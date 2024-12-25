@@ -1,0 +1,36 @@
+remote:
+    - host: 127.0.0.1
+      username: root
+      password: "123456"
+    - host: 192.168.1.2
+      username: root
+      password: "123456"
+operator:
+    disable:
+        - build
+    action:
+        - action: build
+          env:
+            - name: GOOS
+              value: linux
+            - name: GOARCH
+              value: amd64
+          mainPath: .
+          output: ./bin/{GOARCH}/cow_main
+          buildVars:
+            - name: main.Version
+              value: '{BRANCH_NAME}'
+            - name: main.CommitID
+              value: '{COMMIT_ID}'
+        - action: upload
+          localFile: ./bin/{GOARCH}/cow_main
+          remotePath: /tmp
+          target:
+            - 127.0.0.1
+            - 192.168.1.2
+        - action: command
+          target:
+            - 127.0.0.1
+            - 192.168.1.2
+          command:
+            - date
