@@ -40,8 +40,11 @@ type EnvVar struct {
 }
 
 type Operation struct {
-	Disable []string `yaml:"disable,omitempty"`
-	Action  []Action `yaml:"action"`
+	Disable    []string `yaml:"disable,omitempty"`
+	Enable     []string `yaml:"enable,omitempty"`
+	EnableAll  bool     `yaml:"enable-all,omitempty"`
+	DisableAll bool     `yaml:"disable-all,omitempty"`
+	Action     []Action `yaml:"action"`
 }
 
 type Action struct {
@@ -92,42 +95,56 @@ var deployCmd = &cobra.Command{
 
 			switch op.Type {
 			case "build":
-				fmt.Println("Building with environment variables:")
+				arch := ""
+				buildArgs := []string{"build"}
+
 				for _, env := range op.Env {
-					fmt.Printf("%s=%s\n", env.Name, env.Value)
-					os.Setenv(env.Name, env.Value)
+					if env.Name == "GOARCH" {
+						arch = env.Value
+						break
+					}
 				}
+
 				ldFlags := ""
 				for _, buildVar := range op.BuildVars {
 					value := resolveDynamicValue(buildVar.Value)
 					ldFlags += fmt.Sprintf("-X '%s=%s' ", buildVar.Name, value)
 				}
-				log.Printf("Building with ldflags: %s\n", ldFlags)
+
 				mainPath := op.MainPath
 				if mainPath == "" {
 					mainPath = "."
 				}
-				outputName := op.Output
-				if outputName == "" {
-					outputName = "output"
+
+				outputFile := op.Output
+				if outputFile != "" {
+					outputFile = resolveGoArchDynamicValue(outputFile, arch)
+					buildArgs = append(buildArgs, "-o", outputFile)
 				}
-				outputName = resolveGoArchDynamicValue(outputName, "")
-				log.Println("go", "build", "-o", outputName, "-ldflags", ldFlags, mainPath)
-				cmd := exec.Command("go", "build", "-o", outputName, "-ldflags", ldFlags, mainPath)
+
+				if ldFlags != "" {
+					buildArgs = append(buildArgs, "-ldflags", ldFlags)
+				}
+
+				buildArgs = append(buildArgs, mainPath)
+
+				log.Println("[build]", "go", strings.Join(buildArgs, " "))
+				cmd := exec.Command("go", buildArgs...)
 				cmd.Env = os.Environ()
+				for _, env := range op.Env {
+					cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", env.Name, env.Value))
+				}
 				if output, err := cmd.CombinedOutput(); err != nil {
-					log.Fatalf("Build failed: %s\n", err)
-				} else {
-					fmt.Printf("Build output: %s\n", output)
+					log.Fatalf("[build] build failed: %s %s\n", output, err)
 				}
 			case "upload":
 				for _, target := range op.Target {
 					for _, remote := range config.Remote {
 						if remote.Host == target {
-							op.LocalFile = resolveGoArchDynamicValue(op.LocalFile, remote.Arch)
-							err := uploadFileSFTP(op.LocalFile, remote.Host, remote.Username, remote.Password, op.RemotePath)
+							localFile := resolveGoArchDynamicValue(op.LocalFile, remote.Arch)
+							err := uploadFileSFTP(localFile, remote.Host, remote.Username, remote.Password, op.RemotePath)
 							if err != nil {
-								log.Printf("Failed to upload file to %s: %v\n", target, err)
+								log.Printf("[upload] failed to upload file to %s: %v\n", target, err)
 							}
 						}
 					}
@@ -169,14 +186,14 @@ var generateCmd = &cobra.Command{
 				}}}
 		data, err := yaml.Marshal(&defaultConfig)
 		if err != nil {
-			log.Fatalf("Failed to marshal default config: %s\n", err)
+			log.Fatalf("[generate] failed to marshal default config: %s\n", err)
 		}
 
 		if err := ioutil.WriteFile("cow.deploy.yaml", data, 0644); err != nil {
-			log.Fatalf("Failed to write default config file: %s\n", err)
+			log.Fatalf("[generate] failed to write default config file: %s\n", err)
 		}
 
-		fmt.Println("Default configuration file generated as 'cow.deploy.yaml'")
+		fmt.Println("[generate] default configuration file generated as 'cow.deploy.yaml'")
 	},
 }
 
@@ -237,6 +254,8 @@ func getGitCommitID() string {
 }
 
 func uploadFileSFTP(localFile, remoteHost, username, password, remotePath string) error {
+	log.Printf("[upload] uploading file %s to %s\n", localFile, remoteHost)
+
 	conn, err := getSSHClient(remoteHost, username, password)
 	if err != nil {
 		return fmt.Errorf("failed to get SSH client: %w", err)
@@ -263,12 +282,12 @@ func uploadFileSFTP(localFile, remoteHost, username, password, remotePath string
 	_, err = client.Stat(remoteFile)
 	if err == nil {
 		// 同名文件存在，创建备份
-		timestamp := time.Now().Format("20060102_150405")
+		timestamp := time.Now().Format("20060102150405")
 		backupPath := fmt.Sprintf("%s_%s_bak", remoteFile, timestamp)
 		if err := client.Rename(remoteFile, backupPath); err != nil {
 			return fmt.Errorf("failed to backup existing file: %w", err)
 		}
-		fmt.Printf("Backup created: %s\n", backupPath)
+		log.Printf("[upload] backup created: %s\n", backupPath)
 	}
 
 	// 打开本地文件
@@ -281,28 +300,29 @@ func uploadFileSFTP(localFile, remoteHost, username, password, remotePath string
 	// 确保远程目录存在
 	err = client.MkdirAll(remotePath)
 	if err != nil {
-		return fmt.Errorf("failed to create remote directory: %w", err)
+		return fmt.Errorf("[upload] failed to create remote directory: %w", err)
 	}
 
 	// 上传文件
 	dstFile, err := client.Create(remoteFile)
 	if err != nil {
-		return fmt.Errorf("failed to create remote file: %w", err)
+		return fmt.Errorf("[upload] failed to create remote file: %w", err)
 	}
 	defer dstFile.Close()
 
 	_, err = dstFile.ReadFrom(srcFile)
 	if err != nil {
-		return fmt.Errorf("failed to upload file content: %w", err)
+		return fmt.Errorf("[upload] failed to upload file content: %w", err)
 	}
 
 	// 修改远程文件权限为 755
 	err = client.Chmod(remoteFile, 0755)
 	if err != nil {
-		return fmt.Errorf("failed to change file permissions: %w", err)
+		return fmt.Errorf("[upload] failed to change file permissions: %w", err)
 	}
 
-	fmt.Printf("Successfully uploaded %s to %s:%s\n", localFile, remoteHost, remoteFile)
+	log.Printf("[upload] successfully uploaded %s to %s:%s\n", localFile, remoteHost, remoteFile)
+
 	return nil
 }
 

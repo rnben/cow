@@ -6,8 +6,9 @@ remote:
       username: root
       password: "123456"
 operator:
+    enable-all: true
     disable:
-        - build
+        - command
     action:
         - action: build
           env:
@@ -16,14 +17,27 @@ operator:
             - name: GOARCH
               value: amd64
           mainPath: .
-          output: ./bin/{GOARCH}/cow_main
+          output: ./bin/{GOARCH}/cow_main_{GOARCH}
+          buildVars:
+            - name: main.Version
+              value: '{BRANCH_NAME}'
+            - name: main.CommitID
+              value: '{COMMIT_ID}'
+        - action: build
+          env:
+            - name: GOOS
+              value: darwin
+            - name: GOARCH
+              value: arm64
+          mainPath: .
+          output: ./bin/{GOARCH}/cow_main_{GOARCH}
           buildVars:
             - name: main.Version
               value: '{BRANCH_NAME}'
             - name: main.CommitID
               value: '{COMMIT_ID}'
         - action: upload
-          localFile: ./bin/{GOARCH}/cow_main
+          localFile: ./bin/{GOARCH}/cow_main_{GOARCH}
           remotePath: /tmp
           target:
             - 127.0.0.1
